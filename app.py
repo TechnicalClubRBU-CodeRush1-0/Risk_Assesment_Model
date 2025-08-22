@@ -175,6 +175,36 @@ def calculate_debt_to_equity(ticker_symbol):
     except Exception as e:
         st.error(f"An error occurred while fetching D/E ratio: {e}")
         return None
+        
+# --- New VaR/CVaR Calculator Class ---
+class VaRCalculator:
+    """
+    Calculates Value at Risk (VaR) and Conditional VaR (CVaR)
+    based on historical returns.
+    """
+    def __init__(self, historical_returns):
+        self.returns = historical_returns
+
+    def calculate_var(self, confidence_level=0.95):
+        """
+        Calculates VaR at a given confidence level.
+        The VaR is the negative of the specified percentile of the returns distribution.
+        """
+        alpha = 1 - confidence_level
+        var_value = np.percentile(self.returns, alpha * 100)
+        return -var_value
+
+    def calculate_cvar(self, confidence_level=0.95):
+        """
+        Calculates CVaR (Expected Shortfall) at a given confidence level.
+        CVaR is the average of all losses that are worse than the VaR.
+        """
+        var_value = self.calculate_var(confidence_level)
+        tail_losses = self.returns[self.returns <= -var_value]
+        if tail_losses.empty:
+            return 0  # Handle case where no losses exceed VaR
+        cvar_value = -np.mean(tail_losses)
+        return cvar_value
 
 
 # --- Data and Mapping ---
@@ -250,7 +280,7 @@ selected_company = st.selectbox(
 # Get the corresponding ticker symbol from the mapping
 ticker_symbol = beta[sector]['companies'][selected_company]
 
-# Allow the user to input the investment amount (although not used in the assessment logic)
+# Allow the user to input the investment amount
 investment_amount = st.number_input(
     "Enter Investment Amount (in INR):",
     min_value=1000,
@@ -272,18 +302,33 @@ if st.button("Assess Investment"):
         de_ratio = calculate_debt_to_equity(ticker_symbol)
         earnings_volatility = calculate_earnings_volatility(ticker_symbol)
 
+        # --- New VaR/CVaR Calculation ---
+        ticker_data = yf.Ticker(ticker_symbol)
+        hist = ticker_data.history(period="1y")
+        if hist.empty:
+            st.error("Could not fetch historical data for VaR/CVaR calculations.")
+            st.stop()
+            
+        # Calculate daily percentage returns
+        daily_returns = hist['Close'].pct_change().dropna()
+        if daily_returns.empty:
+            st.error("Not enough historical data to calculate returns for VaR/CVaR.")
+            st.stop()
+
+        # Instantiate the calculator and compute VaR and CVaR
+        confidence_level = 0.95
+        var_calc = VaRCalculator(daily_returns)
+        var = var_calc.calculate_var(confidence_level)
+        cvar = var_calc.calculate_cvar(confidence_level)
+
         # Check if data fetching was successful
         if de_ratio is None or earnings_volatility is None:
-            st.error("Could not complete the assessment due to missing data.")
+            st.error("Could not complete the assessment due to missing financial data.")
         else:
-            # --- Assumptions for the assessment (as sentiment and macro data are not available) ---
-            # 1. Sentiment Score: Assuming a slightly positive sentiment. This could be a future input.
+            # --- Assumptions for the assessment ---
             sentiment_score = 0.2
-            # 2. Sector Risk: A general risk level for the sector. Can be set based on the sector's beta.
             sector_risk = 'medium'
-            # 3. Macro Risk: A general market risk score.
             macro_risk = 0.4
-            # 4. Confidence: High confidence in the data quality.
             sentiment_confidence = 0.9
             risk_data_confidence = 0.85
             
@@ -325,5 +370,27 @@ if st.button("Assess Investment"):
             st.write(f"Based on the data, the calculated Debt-to-Equity ratio is **{result['de_ratio']:.2f}** and the historical earnings volatility is **{result['earnings_volatility']:.2f}**.")
             st.write(f"The sector Beta for {sector} is **{result['beta']}**, indicating its volatility relative to the market.")
 
+            # --- Display VaR and CVaR in a new section ---
+            st.markdown("---")
+            st.header("4. Statistical Risk Metrics (VaR & CVaR)")
+            st.markdown(f"**Confidence Level:** {confidence_level*100:.0f}% over a 1-day horizon")
+            
+            # Calculate and display the potential loss in rupees based on the investment amount
+            var_rupees = var * investment_amount
+            cvar_rupees = cvar * investment_amount
+
+            var_col, cvar_col = st.columns(2)
+            with var_col:
+                st.info(f"**VaR (Value at Risk)**: A potential daily loss of up to **₹{var_rupees:,.2f}** is expected in 5% of trading days.")
+                st.info(f"**VaR as Percentage**: {var*100:.2f}%")
+            with cvar_col:
+                st.warning(f"**CVaR (Conditional VaR)**: The average loss on the worst 5% of trading days is **₹{cvar_rupees:,.2f}**.")
+                st.warning(f"**CVaR as Percentage**: {cvar*100:.2f}%")
+            
+            st.markdown("""
+            - **VaR** quantifies the maximum expected loss with a specified confidence level.
+            - **CVaR** (or Expected Shortfall) measures the average loss in the worst-case scenarios, providing a more conservative risk estimate.
+            """)
+            
     except Exception as e:
         st.error(f"An unexpected error occurred during the assessment: {e}")
